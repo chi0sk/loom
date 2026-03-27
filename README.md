@@ -2,6 +2,8 @@
 
 typed binary serialization for roblox. includes direct remote wrappers and higher level channels for events, requests, and state sync.
 
+bad explaination
+
 ```lua
 -- server
 local playerState = LoomChannels.state(remotes.PlayerState, {
