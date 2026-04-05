@@ -1,4 +1,4 @@
--- @chi0sk / sam
+--// @chi0sk / sam
 -- binary serializer for roblox
 
 local Loom = {}
