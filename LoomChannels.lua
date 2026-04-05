@@ -1,6 +1,5 @@
---// @chi0sk / sam
--- higher level helpers on top of loomremote.
--- this is the stuff i'd actually reach for in a game most of the time.
+-- @chi0sk / sam
+-- higher level helpers on top of loomremote
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -54,30 +53,22 @@ end
 local function cloneBuffer(buf: buffer): buffer
 	local len = b_len(buf)
 	local out = b_create(len)
-	if len > 0 then
-		b_copy(out, 0, buf, 0, len)
-	end
+	if len > 0 then b_copy(out, 0, buf, 0, len) end
 	return out
 end
 
 local function valuesEqual(a: any, b: any, seenA: {[table]: table}?, seenB: {[table]: table}?): boolean
-	if a == b then
-		return true
-	end
+	if a == b then return true end
 
 	local ta = typeof(a)
 	local tb = typeof(b)
-	if ta ~= tb then
-		return false
-	end
+	if ta ~= tb then return false end
 
 	if ta == "buffer" then
 		return b_len(a) == b_len(b) and b_readstring(a, 0, b_len(a)) == b_readstring(b, 0, b_len(b))
 	end
 
-	if ta ~= "table" then
-		return false
-	end
+	if ta ~= "table" then return false end
 
 	seenA = seenA or {}
 	seenB = seenB or {}
@@ -92,15 +83,11 @@ local function valuesEqual(a: any, b: any, seenA: {[table]: table}?, seenB: {[ta
 	seenB[b] = a
 
 	for key, value in pairs(a) do
-		if not valuesEqual(value, b[key], seenA, seenB) then
-			return false
-		end
+		if not valuesEqual(value, b[key], seenA, seenB) then return false end
 	end
 
 	for key in pairs(b) do
-		if a[key] == nil and b[key] ~= nil then
-			return false
-		end
+		if a[key] == nil and b[key] ~= nil then return false end
 	end
 
 	return true
@@ -108,19 +95,12 @@ end
 
 local function cloneValue(value: any, seen: {[table]: table}?): any
 	local kind = typeof(value)
-	if kind == "buffer" then
-		return cloneBuffer(value)
-	end
-
-	if kind ~= "table" then
-		return value
-	end
+	if kind == "buffer" then return cloneBuffer(value) end
+	if kind ~= "table" then return value end
 
 	seen = seen or {}
 	local mapped = seen[value]
-	if mapped then
-		return mapped
-	end
+	if mapped then return mapped end
 
 	local out = table.clone(value)
 	seen[value] = out
@@ -157,8 +137,7 @@ function LoomChannels.request(remote: RemoteFunction, requestCodec: any, respons
 	local encodeRequest, decodeRequest = buildCodecIo(requestCodec, options and options.requestHeader == true)
 	local encodeResponse, decodeResponse = buildCodecIo(responseCodec, options and options.responseHeader == true)
 	local errorCodec = Loom.bounded_str(options and options.maxErrorLength or 240)
-	-- this wrapper codec keeps the request path small and gives us an error lane back.
-	-- tag 0 = success payload, tag 1 = error string.
+	-- tag 0 = success, tag 1 = error string
 	local responseEnvelopeCodec = {
 		encode = function(w, value)
 			if value.tag == 0 then
@@ -177,9 +156,7 @@ function LoomChannels.request(remote: RemoteFunction, requestCodec: any, respons
 				local start = r._pos
 				local len = r:remaining()
 				local payload = b_create(len)
-				if len > 0 then
-					b_copy(payload, 0, packet, start, len)
-				end
+				if len > 0 then b_copy(payload, 0, packet, start, len) end
 				r._pos += len
 				return {tag = 0, value = decodeResponse(payload)}
 			end
@@ -342,9 +319,7 @@ function LoomChannels.state(remote: RemoteEvent, fields: {{any}}, options)
 		assert(RunService:IsServer(), "loomchannels.state: Push can only be used on the server")
 		local prevState = self._lastByPlayer[player] or {}
 		local delta, changed = buildDelta(fieldNames, prevState, state)
-		if not changed then
-			return false
-		end
+		if not changed then return false end
 
 		self._remote:FireClient(player, delta)
 		self._lastByPlayer[player] = cloneValue(state)
