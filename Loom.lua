@@ -1,7 +1,5 @@
---// @chi0sk / sam
--- binary serializer for roblox.
--- use raw codecs for remotes, schemas when you want versioning too.
--- strings/base64 helpers are here too so i can use the same module everywhere.
+-- @chi0sk / sam
+-- binary serializer for roblox
 
 local Loom = {}
 local NONE = table.freeze({})
@@ -31,25 +29,18 @@ local b_writef64    = buffer.writef64
 local str_byte = string.byte
 local str_char = string.char
 
--- // constants
-
-local MAGIC_0           = 0x42        -- 'B'
-local MAGIC_1           = 0x53        -- 'S'
-local WRITER_INIT_CAP   = 256         -- initial writer capacity, doubles on overflow
-local VARINT_MAX_BYTES  = 5           -- max leb128 bytes for a u32
-local VARINT_MAX_VALUE  = 0xFFFFFFFF  -- decoded varints above this are corrupt
+local MAGIC_0           = 0x42
+local MAGIC_1           = 0x53
+local WRITER_INIT_CAP   = 256
+local VARINT_MAX_BYTES  = 5
+local VARINT_MAX_VALUE  = 0xFFFFFFFF
 local MAX_SAFE_INTEGER  = 9007199254740991
 local MIN_SAFE_INTEGER  = -MAX_SAFE_INTEGER
--- floor(32767 * sqrt(2)) = 46340. tightest safe scale for smallest-3 quaternion
--- components stored as i16. non-dropped components are always in [-1/sqrt(2), 1/sqrt(2)]
--- so this fills the full i16 range without clamping needed in the normal case.
+-- floor(32767 * sqrt(2)), fills i16 range for smallest-3 components
 local QUAT_SCALE        = 46340
--- default safety cap for collection codecs. override per-codec via optional argument.
 local DEFAULT_MAX_COUNT = 65536
 
--- // base64
--- messagingservice json-encodes everything so we need this.
--- datastores take raw byte strings too but base64 works there, so we just unify.
+-- base64 (messagingservice needs it since it json-encodes everything)
 
 local B64_STR = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 local B64_PAD = str_byte("=")
@@ -64,9 +55,7 @@ end
 
 local function base64Encode(s: string): string
 	local n = #s
-	if n == 0 then
-		return ""
-	end
+	if n == 0 then return "" end
 
 	local outLen = math.ceil(n / 3) * 4
 	local out = b_create(outLen)
@@ -93,9 +82,7 @@ end
 
 local function base64Decode(s: string): string
 	local n = #s
-	if n == 0 then
-		return ""
-	end
+	if n == 0 then return "" end
 
 	if n % 4 ~= 0 then
 		error(string.format("loom: base64 length %d is not a multiple of 4", n), 2)
@@ -152,9 +139,7 @@ local function strToBuf(s: string): buffer
 	return buf
 end
 
--- // writer
--- dynamic growing buffer. doubles on overflow so resizes are O(n) amortized.
--- call flush() at the end to get a tight output buffer.
+-- writer (doubles on overflow)
 
 local WriterMeta = {}
 WriterMeta.__index = WriterMeta
@@ -186,8 +171,6 @@ function WriterMeta:_reserve(n: number)
 	if self._pos + n > self._cap then self:_grow(n) end
 end
 
--- all integer write methods assert valid ranges. passing out-of-range values
--- previously produced silent undefined behavior depending on the roblox buffer impl.
 function WriterMeta:writeU8(v: number)
 	assert(v >= 0 and v <= 255 and math.floor(v) == v,
 		string.format("loom: writeU8 value %s out of range [0, 255]", tostring(v)))
@@ -248,17 +231,12 @@ function WriterMeta:writeF64(v: number)
 	self._pos += 8
 end
 
--- leb128 unsigned varint. values < 128 = 1 byte, < 16384 = 2 bytes, etc.
--- use this instead of u32 when values are usually small (counts, ids, damage numbers).
--- [fix] now asserts value is in [0, VARINT_MAX_VALUE] so encode/decode contracts match.
---       previously you could write a value that readVarint would later reject, breaking
---       round-trips silently.
+-- leb128 unsigned varint. values < 128 cost 1 byte.
 function WriterMeta:writeVarint(v: number)
 	v = math.floor(v)
 	assert(v >= 0 and v <= VARINT_MAX_VALUE,
 		string.format("loom: writeVarint value %s out of range [0, %d]", tostring(v), VARINT_MAX_VALUE))
 	while v >= 128 do
-		-- direct buffer write: continuation bytes are internal encoding bytes, always valid
 		self:_reserve(1)
 		b_writeu8(self._buf, self._pos, v % 128 + 128)
 		self._pos += 1
@@ -269,9 +247,7 @@ function WriterMeta:writeVarint(v: number)
 	self._pos += 1
 end
 
--- zigzag encode then leb128. maps 0->0, -1->1, 1->2, -2->3...
--- raw leb128 on a negative number wastes bytes since it looks like a huge unsigned int.
--- the writeVarint below will assert the zigzag-encoded value fits in u32 (~[-2^31, 2^31]).
+-- zigzag encode then leb128
 function WriterMeta:writeSVarint(v: number)
 	local z = v >= 0 and v * 2 or (-v * 2) - 1
 	self:writeVarint(z)
@@ -283,7 +259,6 @@ function WriterMeta:writeBool(v: boolean)
 	self._pos += 1
 end
 
--- varint-prefixed utf8 string. empty string = single 0x00.
 function WriterMeta:writeStr(v: string)
 	local len = #v
 	self:writeVarint(len)
@@ -294,14 +269,12 @@ function WriterMeta:writeStr(v: string)
 	end
 end
 
--- copy a slice of another buffer in directly without any intermediate allocation
 function WriterMeta:copyFrom(src: buffer, srcOffset: number, count: number)
 	self:_reserve(count)
 	b_copy(self._buf, self._pos, src, srcOffset, count)
 	self._pos += count
 end
 
--- returns a tight buffer containing exactly the bytes written so far
 function WriterMeta:flush(): buffer
 	local out = b_create(self._pos)
 	b_copy(out, 0, self._buf, 0, self._pos)
@@ -312,8 +285,7 @@ function WriterMeta:pos(): number
 	return self._pos
 end
 
--- // reader
--- cursor-based. throws on overread with a message pointing at the codec that broke.
+-- reader
 
 local ReaderMeta = {}
 ReaderMeta.__index = ReaderMeta
@@ -397,9 +369,6 @@ function ReaderMeta:readF64(): number
 	return v
 end
 
--- 128^k for k=1..5 are all exact doubles (powers of 2 up to 2^35), safe as multipliers.
--- overflow check: 5 bytes of leb128 can encode up to 2^35-1, but we only want u32 max.
--- values in that gap previously decoded silently to wrong numbers.
 function ReaderMeta:readVarint(): number
 	local result = 0
 	local mul    = 1
@@ -421,7 +390,6 @@ end
 
 function ReaderMeta:readSVarint(): number
 	local z = self:readVarint()
-	-- undo zigzag: even -> positive, odd -> negative
 	return z % 2 == 0 and z / 2 or -(z + 1) / 2
 end
 
@@ -438,7 +406,6 @@ function ReaderMeta:readStr(): string
 	return s
 end
 
--- skip n bytes. useful in migration functions when dropping old fields.
 function ReaderMeta:skip(n: number)
 	self:_check(n)
 	self._pos += n
@@ -452,15 +419,12 @@ function ReaderMeta:remaining(): number
 	return self._len - self._pos
 end
 
--- // codec type
--- a codec is {encode, decode} plus optional metadata fields (fieldIndex, fieldCount).
-
 export type Codec<T> = {
 	encode: (writer: Writer, value: T) -> (),
 	decode: (reader: Reader) -> T,
 }
 
--- // primitive codecs
+-- primitive codecs
 
 Loom.u8 = {
 	encode = function(w: Writer, v: number) w:writeU8(v) end,
@@ -502,7 +466,6 @@ Loom.f64 = {
 	decode = function(r: Reader) return r:readF64() end,
 } :: Codec<number>
 
--- lua numbers are f64 under the hood so this is just an alias
 Loom.number = Loom.f64
 
 local function assertSafeInteger(v: number, minValue: number, maxValue: number, label: string)
@@ -540,13 +503,11 @@ Loom.uint53 = {
 
 Loom.f64_int = Loom.int53
 
--- leb128 unsigned. almost always cheaper than u32 for values that tend to be small.
 Loom.varint = {
 	encode = function(w: Writer, v: number) w:writeVarint(v) end,
 	decode = function(r: Reader) return r:readVarint() end,
 } :: Codec<number>
 
--- zigzag + leb128. use for signed values that are usually small magnitude.
 Loom.svarint = {
 	encode = function(w: Writer, v: number) w:writeSVarint(v) end,
 	decode = function(r: Reader) return r:readSVarint() end,
@@ -562,7 +523,6 @@ Loom.str = {
 	decode = function(r: Reader) return r:readStr() end,
 } :: Codec<string>
 
--- same wire format as str, different semantic label for raw binary blobs
 Loom.bytes = Loom.str
 
 Loom.buffer = {
@@ -575,9 +535,7 @@ Loom.buffer = {
 	end,
 	decode = function(r: Reader): buffer
 		local len = r:readVarint()
-		if len == 0 then
-			return b_create(0)
-		end
+		if len == 0 then return b_create(0) end
 		r:_check(len)
 		local out = b_create(len)
 		b_copy(out, 0, r._buf, r._pos, len)
@@ -586,9 +544,8 @@ Loom.buffer = {
 	end,
 } :: Codec<buffer>
 
--- bounded_str: like str but errors on encode and decode if the string exceeds maxLen bytes.
--- use this anywhere you accept strings from untrusted clients to prevent memory abuse.
--- example: Loom.bounded_str(256)  -- player usernames, chat messages, etc.
+-- bounded_str: rejects strings over maxLen on both ends
+-- example: Loom.bounded_str(256)
 function Loom.bounded_str(maxLen: number): Codec<string>
 	assert(maxLen >= 1, "bounded_str: maxLen must be >= 1")
 	return {
@@ -613,9 +570,8 @@ function Loom.bounded_str(maxLen: number): Codec<string>
 	}
 end
 
--- // roblox type codecs
+-- roblox types
 
--- vec2: 2x f32 = 8 bytes
 Loom.vec2 = {
 	encode = function(w: Writer, v: Vector2)
 		w:_reserve(8)
@@ -628,7 +584,6 @@ Loom.vec2 = {
 	end,
 } :: Codec<Vector2>
 
--- vec3: 3x f32 = 12 bytes
 Loom.vec3 = {
 	encode = function(w: Writer, v: Vector3)
 		w:_reserve(12)
@@ -642,10 +597,9 @@ Loom.vec3 = {
 	end,
 } :: Codec<Vector3>
 
--- color3: 3x u8 = 3 bytes. quantizes 0-1 to 0-255. don't use for HDR values.
+-- color3: quantizes to 3 bytes, don't use for HDR
 Loom.color3 = {
 	encode = function(w: Writer, v: Color3)
-		-- clamp guards against the rare f32 values slightly outside [0,1]
 		local r8 = math.clamp(math.round(v.R * 255), 0, 255)
 		local g8 = math.clamp(math.round(v.G * 255), 0, 255)
 		local b8 = math.clamp(math.round(v.B * 255), 0, 255)
@@ -660,7 +614,6 @@ Loom.color3 = {
 	end,
 } :: Codec<Color3>
 
--- udim: f32 scale + i16 offset = 6 bytes. i16 covers all real ui offsets.
 Loom.udim = {
 	encode = function(w: Writer, v: UDim)
 		w:_reserve(6)
@@ -674,7 +627,6 @@ Loom.udim = {
 	end,
 } :: Codec<UDim>
 
--- udim2: 2x udim = 12 bytes
 Loom.udim2 = {
 	encode = function(w: Writer, v: UDim2)
 		w:_reserve(12)
@@ -704,21 +656,10 @@ Loom.vec3int16 = {
 	end,
 } :: Codec<Vector3int16>
 
--- // quaternion helpers (shared by all CFrame codecs)
---
--- how smallest-3 works:
---   unit quaternion: w^2 + x^2 + y^2 + z^2 = 1
---   the largest component is dropped and reconstructed via sqrt on decode.
---   the remaining 3 are always in [-1/sqrt(2), 1/sqrt(2)] when the dropped one is the
---   largest (if |x| > 1/sqrt(2) then x^2 > 0.5, so w^2 < 0.5 meaning |w| < |x|,
---   contradicting |w| being the largest). we scale to [-QUAT_SCALE, QUAT_SCALE] and
---   store as i16. we negate all components if the dropped one is negative so it always
---   reconstructs as positive via sqrt -- q and -q are the same rotation.
---   wire format: 1 byte drop tag + 3x i16 = 7 bytes total.
+-- quaternion helpers (smallest-3)
+-- drop the largest component, store the other 3 scaled to i16.
+-- negate everything if the dropped component is negative so decode can always sqrt.
 
--- rotation matrix -> quaternion via shepperd's method.
--- handles all 4 numerically stable cases. the naive trace-only version breaks when
--- trace is near -1 (near-zero denominator).
 local function cfToQuat(cf: CFrame): (number, number, number, number)
 	local _, _, _, r00, r01, r02, r10, r11, r12, r20, r21, r22 = cf:GetComponents()
 	local trace = r00 + r11 + r22
@@ -751,7 +692,6 @@ local function cfToQuat(cf: CFrame): (number, number, number, number)
 	return qw, qx, qy, qz
 end
 
--- shared by cframe_compressed and cframe_net. no temp table allocation.
 local function encodeSmallest3(w: Writer, qw: number, qx: number, qy: number, qz: number)
 	local drop   = 0
 	local maxAbs = math.abs(qw)
@@ -760,7 +700,6 @@ local function encodeSmallest3(w: Writer, qw: number, qx: number, qy: number, qz
 	if aY > maxAbs then maxAbs = aY; drop = 2 end
 	if aZ > maxAbs then               drop = 3 end
 
-	-- negate all if dropped component is negative so decode reconstructs via sqrt
 	local sign = 1
 	if (drop == 0 and qw < 0) or (drop == 1 and qx < 0)
 	or (drop == 2 and qy < 0) or (drop == 3 and qz < 0) then
@@ -768,7 +707,6 @@ local function encodeSmallest3(w: Writer, qw: number, qx: number, qy: number, qz
 	end
 	local sw, sx, sy, sz = qw * sign, qx * sign, qy * sign, qz * sign
 
-	-- direct i16 buffer writes bypass the range assert (clamp guarantees valid)
 	local buf, pos = w._buf, w._pos
 	w:_reserve(7)
 	b_writeu8(buf, pos, drop)
@@ -788,8 +726,6 @@ local function encodeSmallest3(w: Writer, qw: number, qx: number, qy: number, qz
 	w._pos = pos
 end
 
--- decodes 7-byte smallest-3 back to (qw, qx, qy, qz).
--- validates drop index (corrupt buffer guard). no temp table.
 local function decodeSmallest3(r: Reader): (number, number, number, number)
 	local drop = r:readU8()
 	if drop > 3 then
@@ -798,18 +734,15 @@ local function decodeSmallest3(r: Reader): (number, number, number, number)
 	local a = r:readI16() / QUAT_SCALE
 	local b = r:readI16() / QUAT_SCALE
 	local c = r:readI16() / QUAT_SCALE
-	-- dropped component always reconstructs positive (we negated on encode if needed).
-	-- components were written in wire order 0,1,2,3 skipping `drop`.
 	local d = math.sqrt(math.max(0, 1 - a*a - b*b - c*c))
-	if     drop == 0 then return  d, a, b, c  -- qw dropped: wire = qx, qy, qz
-	elseif drop == 1 then return  a, d, b, c  -- qx dropped: wire = qw, qy, qz
-	elseif drop == 2 then return  a, b, d, c  -- qy dropped: wire = qw, qx, qz
-	else                   return  a, b, c, d -- qz dropped: wire = qw, qx, qy
+	if     drop == 0 then return  d, a, b, c
+	elseif drop == 1 then return  a, d, b, c
+	elseif drop == 2 then return  a, b, d, c
+	else                   return  a, b, c, d
 	end
 end
 
--- cframe: position (3x f32 = 12) + full quaternion (4x f32 = 16) = 28 bytes.
--- use when you need full f32 rotation precision (cutscenes, physics replication).
+-- cframe: f32 position + full f32 quaternion
 Loom.cframe = {
 	encode = function(w: Writer, cf: CFrame)
 		local p = cf.Position
@@ -831,9 +764,7 @@ Loom.cframe = {
 	end,
 } :: Codec<CFrame>
 
--- cframe_compressed: f32 position (12) + smallest-3 quaternion (7) = 19 bytes.
--- 9 bytes smaller than cframe. rotation precision ~0.001 rad, fine for almost everything.
--- use when you need f32 position accuracy but not full quaternion storage.
+-- cframe_compressed: f32 position + smallest-3 rotation
 Loom.cframe_compressed = {
 	encode = function(w: Writer, cf: CFrame)
 		local p = cf.Position
@@ -852,16 +783,9 @@ Loom.cframe_compressed = {
 	end,
 } :: Codec<CFrame>
 
--- cframe_net: quantized u16 position (6) + smallest-3 quaternion (7) = 13 bytes.
--- 32% smaller than cframe_compressed, 54% smaller than cframe.
--- position precision: (posMax - posMin) / 65535 per axis.
--- default range +-4096 studs -> ~0.125 stud resolution (imperceptible in gameplay).
--- use for high-frequency gameplay networking (player replication, projectiles, etc).
---
--- bytes by codec:     cframe=28  cframe_compressed=19  cframe_net=13
---
--- example: Loom.cframe_net()              -- +-4096 studs, ~0.125 stud precision
---          Loom.cframe_net(-1024, 1024)   -- tighter range, same 16-bit precision
+-- cframe_net: quantized u16 position + smallest-3 rotation
+-- example: Loom.cframe_net()           -- +-4096 studs
+--          Loom.cframe_net(-1024, 1024)
 function Loom.cframe_net(posMin: number?, posMax: number?): Codec<CFrame>
 	local pMin   = posMin or -4096
 	local pMax   = posMax or  4096
@@ -897,8 +821,7 @@ function Loom.cframe_net(posMin: number?, posMax: number?): Codec<CFrame>
 	}
 end
 
--- roblox enum item stored as its u32 value. names can't change without breaking
--- games so this is safer than storing the string.
+-- stored as u32 value, not name string
 -- example: Loom.roblox_enum(Enum.HumanoidRigType)
 function Loom.roblox_enum(enumType: Enum): Codec<EnumItem>
 	local byValue: {[number]: EnumItem} = {}
@@ -920,11 +843,9 @@ function Loom.roblox_enum(enumType: Enum): Codec<EnumItem>
 	}
 end
 
--- quantized vec3: maps each axis from [minVal, maxVal] to an integer.
--- bits=8  -> u8 per axis  = 3 bytes total  (256 steps across range)
--- bits=16 -> u16 per axis = 6 bytes total  (65535 steps across range)
--- values outside [minVal, maxVal] clamp silently, so don't feed it unbounded input.
--- example: Loom.vec3_quantized(-4096, 4096, 16) = 6 bytes, ~0.12 unit precision
+-- quantized vec3
+-- bits=8 -> 3 bytes, bits=16 -> 6 bytes
+-- example: Loom.vec3_quantized(-4096, 4096, 16)
 function Loom.vec3_quantized(minVal: number, maxVal: number, bits: number): Codec<Vector3>
 	assert(bits == 8 or bits == 16, "vec3_quantized: bits must be 8 or 16")
 	assert(minVal < maxVal, "vec3_quantized: minVal must be less than maxVal")
@@ -967,13 +888,11 @@ function Loom.vec3_quantized(minVal: number, maxVal: number, bits: number): Code
 	end
 end
 
--- // composite codecs
+-- composite codecs
 
--- array: varint count + n elements. pre-allocates on decode.
--- maxCount (default 65536) prevents malicious/corrupt count from crashing
--- the server via table.create(2_000_000_000).
+-- array: varint count + elements
 -- example: Loom.array(Loom.u32)
--- example: Loom.array(Loom.str, 1000)   -- cap at 1000 elements
+-- example: Loom.array(Loom.str, 1000)
 function Loom.array<T>(elementCodec: Codec<T>, maxCount: number?): Codec<{T}>
 	local limit = maxCount or DEFAULT_MAX_COUNT
 	return {
@@ -1002,15 +921,8 @@ function Loom.array<T>(elementCodec: Codec<T>, maxCount: number?): Codec<{T}>
 	}
 end
 
--- map: varint count + key/value pairs.
--- keys are sorted before writing for deterministic wire order. identical tables
--- always produce identical byte sequences regardless of lua iteration order.
--- this matters for cache keys, replication diffs, and replay systems.
--- maxCount (default 65536) prevents unbounded allocation on decode.
--- [fix] validates all keys share the same type before sorting. mixed-type keys
---       (e.g. "a" and 1) crash table.sort with a confusing error. this catches it early.
--- note: sorting adds a small O(n log n) overhead; use array(struct) if you need
---       maximum throughput and don't care about determinism.
+-- map: sorted keys for deterministic wire order
+-- note: sorting adds O(n log n) overhead, use array(struct) if you need max throughput
 function Loom.map<K, V>(keyCodec: Codec<K>, valCodec: Codec<V>, maxCount: number?): Codec<{[K]: V}>
 	local limit = maxCount or DEFAULT_MAX_COUNT
 	return {
@@ -1033,13 +945,9 @@ function Loom.map<K, V>(keyCodec: Codec<K>, valCodec: Codec<V>, maxCount: number
 					end
 				end
 				if kt == "string" or kt == "number" then
-					sortFn = function(a, b)
-						return a < b
-					end
+					sortFn = function(a, b) return a < b end
 				elseif kt == "boolean" then
-					sortFn = function(a, b)
-						return a == false and b == true
-					end
+					sortFn = function(a, b) return a == false and b == true end
 				else
 					error(string.format(
 						"loom: map keys of type '%s' can't be sorted deterministically; use string, number, or boolean keys",
@@ -1072,21 +980,9 @@ function Loom.map<K, V>(keyCodec: Codec<K>, valCodec: Codec<V>, maxCount: number
 	}
 end
 
--- // struct implementation helpers
---
--- instead of generating n wrapper closures and calling them through an array, we capture
--- each field's encode/decode function and name directly into parallel arrays. this:
---   a) eliminates n closure allocations at schema creation time
---   b) removes one indirection per field on the hot encode/decode path
---   c) for small structs (<= 8 fields) the loop is fully unrolled into direct upvalue calls
---      with no array indexing and no loop overhead -- straight-line function calls.
---
--- this is essentially the "compiled schema" pattern: instead of interpreting the field list
--- every call, we build specialized code at creation time that knows the exact layout.
--- source engine send tables work on the same principle.
+-- struct unroll helpers
+-- for n <= 8 we skip the loop entirely, direct upvalue calls
 
--- builds a flat (loop-free) encode dispatcher for n <= 8. above that falls back to a loop.
--- each returned function has signature (w: Writer, v: {[string]: any}).
 local function buildUnrolledEncode(
 	encFns: {any},
 	names: {string},
@@ -1209,7 +1105,6 @@ local function buildUnrolledEncode(
 			e1(w,x1); e2(w,x2); e3(w,x3); e4(w,x4); e5(w,x5); e6(w,x6); e7(w,x7); e8(w,x8)
 		end
 	else
-		-- loop fallback for large structs. still uses direct fn+name upvalues.
 		return function(w, v)
 			for i = 1, n do
 				local value = v[names[i]]
@@ -1226,7 +1121,6 @@ local function buildUnrolledEncode(
 	end
 end
 
--- same unroll pattern for decode. signature: (r: Reader) -> {[string]: any}.
 local function buildUnrolledDecode(decFns: {any}, names: {string}, n: number): (Reader) -> {[string]: any}
 	if n == 1 then
 		local d1,n1 = decFns[1],names[1]
@@ -1261,16 +1155,8 @@ local function buildUnrolledDecode(decFns: {any}, names: {string}, n: number): (
 	end
 end
 
--- struct: ordered list of {name, codec} pairs.
--- field order IS the wire format. always append new fields at the end.
--- never reorder or remove fields -- use migrations and Loom.literal for that.
---
--- the returned codec has two extra fields:
---   codec.fieldIndex(name) -> 1-based stable index, or nil if not found
---   codec.fieldCount       -> total number of fields
--- these let higher-level systems build delta masks, priority schedulers, etc.
--- without scanning field lists every frame. same concept as source engine send tables.
---
+-- struct: field order is wire format, never reorder/remove fields
+-- append new fields at the end only
 -- example:
 --   Loom.struct({
 --     {"id",     Loom.u32},
@@ -1292,25 +1178,20 @@ function Loom.struct(fields: {{any}}): Codec<{[string]: any}>
 		assert(type(pair[2]) == "table",  string.format("struct field %d ('%s'): codec must be a table", i, pair[1]))
 		local nm    = pair[1] :: string
 		local codec = pair[2] :: Codec<any>
-		encFns[i]    = codec.encode
-		decFns[i]    = codec.decode
-		names[i]     = nm
+		encFns[i]      = codec.encode
+		decFns[i]      = codec.decode
+		names[i]       = nm
 		hasDefaults[i] = pair[3] ~= nil
-		defaults[i] = pair[3]
-		indexMap[nm] = i
+		defaults[i]    = pair[3]
+		indexMap[nm]   = i
 	end
 
-	-- build flat dispatch functions. for n <= 8, fully unrolled (no loop, no array indexing).
-	-- for n > 8, still faster than the old wrapper-closure approach since there are no
-	-- intermediate closures -- we call each codec's encode/decode function directly.
 	local encFn = buildUnrolledEncode(encFns, names, hasDefaults, defaults, n)
 	local decFn = buildUnrolledDecode(decFns, names, n)
 
 	return {
 		encode = encFn,
 		decode = decFn,
-		-- stable field index lookup for building delta masks, priority schedulers, etc.
-		-- returns a 1-based index that is stable as long as the schema definition doesn't change.
 		fieldIndex = function(name: string): number?
 			return indexMap[name]
 		end,
@@ -1318,33 +1199,11 @@ function Loom.struct(fields: {{any}}): Codec<{[string]: any}>
 	}
 end
 
--- delta_struct: sparse field updates with native delete support.
--- wire format:
---   1 byte mode
---   ceil(n/8) presence bytes
---   optional ceil(n/8) delete bytes when mode bit 0 is set
---   encoded values for fields marked present
--- fields absent from v are skipped entirely.
--- fields set to Loom.none / Loom.None are treated as explicit deletes.
--- decode returns only changed fields. deletes come back as Loom.none.
---
--- use case: frequent partial state updates where most fields are unchanged.
--- a player struct with 8 fields where only position changes per tick uses
--- 2 header bytes + 12 bytes (vec3) = 14 bytes instead of the full struct size.
--- apply with Loom.applyDelta(state, delta) so deletes work too.
---
--- field order and count must stay stable (same rules as struct).
--- field count can be bigger than 64. the header just grows with the schema.
---
--- example:
---   local PlayerDelta = Loom.delta_struct({
---     {"position", Loom.vec3},
---     {"health",   Loom.f32},
---     {"flags",    Loom.bitfield({"isAdmin", "inCombat"})},
---   })
---   local buf   = Loom.encodeRaw(PlayerDelta, {health = 80})
---   local delta = Loom.decodeRaw(PlayerDelta, buf)
---   Loom.applyDelta(state, delta)
+-- delta_struct: sparse updates with delete support
+-- wire format: 1 byte mode + ceil(n/8) presence bytes + optional delete bytes + values
+-- fields absent from v are skipped. Loom.none marks a delete.
+-- decode returns only changed fields; deletes come back as Loom.none.
+-- apply with Loom.applyDelta so deletes are handled correctly.
 function Loom.delta_struct(fields: {{any}}): Codec<{[string]: any}>
 	local n = #fields
 	assert(n >= 1, "delta_struct: needs at least one field")
@@ -1418,7 +1277,7 @@ function Loom.delta_struct(fields: {{any}}): Codec<{[string]: any}>
 			local out: {[string]: any} = {}
 			for i = 1, n do
 				local cf = compiled[i]
-				local hasValue = bit32.band(presentMask[cf.bi], cf.bit) ~= 0
+				local hasValue  = bit32.band(presentMask[cf.bi], cf.bit) ~= 0
 				local hasDelete = bit32.band(deleteMask[cf.bi], cf.bit) ~= 0
 				if hasValue and hasDelete then
 					error(string.format(
@@ -1437,32 +1296,16 @@ function Loom.delta_struct(fields: {{any}}): Codec<{[string]: any}>
 	}
 end
 
--- tracked_struct: automatic change detection for delta encoding.
--- you give it the full prev and curr state; it builds the delta internally and only
--- encodes fields that actually changed. removes the error-prone manual "did this field
--- change?" bookkeeping from the caller.
---
--- uses the same wire format as delta_struct (bitmask + changed values) so the two are
--- interchangeable on the decode side.
---
--- comparison uses ~= which means:
---   numbers, strings, booleans: exact equality. works correctly.
---   Vector3, CFrame, Color3, etc.: uses __eq which compares component-wise. works correctly.
---   nested tables (e.g. bitfield sub-tables): reference equality only. you must replace the
---   whole table reference to trigger detection, not just mutate a field inside it.
--- when a field is cleared to nil, decode returns Loom.none so the caller can delete it.
---
+-- tracked_struct: diffs prev/curr for you, encodes only what changed
+-- uses the same wire format as delta_struct
+-- nested table fields use reference equality, so replace the table to trigger detection
 -- example:
 --   local Tracker = Loom.tracked_struct({
 --     {"position", Loom.vec3},
 --     {"health",   Loom.f32},
---     {"ammo",     Loom.u8},
 --   })
---
---   -- server: encode only what changed between ticks
 --   local buf   = Loom.encodeRaw(Tracker, prevState, currState)
 --   local delta = Loom.decodeRaw(Tracker, buf)
---   -- client: apply delta on top of its own copy
 --   Loom.applyDelta(clientState, delta)
 function Loom.tracked_struct(fields: {{any}}): {
 	encode: (writer: Writer, prev: {[string]: any}, curr: {[string]: any}) -> (),
@@ -1470,16 +1313,12 @@ function Loom.tracked_struct(fields: {{any}}): {
 }
 	local inner = Loom.delta_struct(fields)
 	local n     = #fields
-
-	-- pre-capture field names for the diff loop
 	local names: {string} = table.create(n)
 	for i, pair in ipairs(fields) do
 		names[i] = pair[1] :: string
 	end
 
 	return {
-		-- encode takes (writer, prev, curr) instead of the usual (writer, value).
-		-- builds the delta automatically so you just pass full state snapshots.
 		encode = function(w: Writer, prev: {[string]: any}, curr: {[string]: any})
 			local delta: {[string]: any} = {}
 			for i = 1, n do
@@ -1510,8 +1349,7 @@ function Loom.isNone(value: any): boolean
 	return value == NONE
 end
 
--- optional: 1 byte presence flag + value if present.
--- nil -> 0x00. present -> 0x01 + encoded value.
+-- optional: 1 byte presence + value if set
 function Loom.optional<T>(inner: Codec<T>): Codec<T?>
 	return {
 		encode = function(w: Writer, v: T?)
@@ -1533,11 +1371,9 @@ function Loom.optional<T>(inner: Codec<T>): Codec<T?>
 	}
 end
 
--- union: u8 tag (0-indexed) + the variant's value.
--- encode as {tag = n, value = v}. decode returns the same shape.
--- example:
---   local Reward = Loom.union({Loom.str, Loom.u32})
---   encode(w, {tag=0, value="sword"}) or encode(w, {tag=1, value=500})
+-- union: u8 tag + variant value
+-- example: local Reward = Loom.union({Loom.str, Loom.u32})
+--          encode(w, {tag=0, value="sword"})
 function Loom.union(codecs: {Codec<any>}): Codec<{tag: number, value: any}>
 	assert(#codecs >= 1,   "union: needs at least one codec")
 	assert(#codecs <= 255, "union: max 255 variants (u8 tag)")
@@ -1562,10 +1398,8 @@ function Loom.union(codecs: {Codec<any>}): Codec<{tag: number, value: any}>
 	}
 end
 
--- tuple: fixed-length heterogeneous sequence as an integer-keyed table.
--- cheaper than struct when you don't need field names.
+-- tuple: fixed-length heterogeneous sequence, integer-keyed
 -- example: Loom.tuple({Loom.u32, Loom.str, Loom.f32})
---          encode(w, {42, "hello", 3.14})
 function Loom.tuple(codecs: {Codec<any>}): Codec<{any}>
 	local count = #codecs
 	return {
@@ -1584,9 +1418,8 @@ function Loom.tuple(codecs: {Codec<any>}): Codec<{any}>
 	}
 end
 
--- bitfield: packs named booleans into ceil(n/8) bytes.
--- field order is the bit order -- keep it stable.
--- example: Loom.bitfield({"isAdmin", "isPremium", "isBanned"}) = 1 byte for all 3
+-- bitfield: packs named booleans into ceil(n/8) bytes
+-- example: Loom.bitfield({"isAdmin", "isPremium", "isBanned"})
 function Loom.bitfield(fields: {string}): Codec<{[string]: boolean}>
 	local n = #fields
 	assert(n >= 1, "bitfield: needs at least one field")
@@ -1623,15 +1456,13 @@ function Loom.bitfield(fields: {string}): Codec<{[string]: boolean}>
 	}
 end
 
--- enum: encodes string values as varint indices. values < 128 entries = 1 byte.
--- errors if the value is not in the enum (previously wrote nil as a varint which would
--- crash inside writeVarint with a confusing message).
+-- enum: string -> varint index. values < 128 = 1 byte.
 -- example: Loom.enum({"sword", "shield", "bow"})
 function Loom.enum(values: {string}): Codec<string>
 	assert(#values >= 1, "enum: needs at least one value")
 	local toIdx: {[string]: number} = {}
 	for i, v in ipairs(values) do
-		toIdx[v] = i - 1  -- 0-indexed so small ordinals encode as 1 byte
+		toIdx[v] = i - 1
 	end
 	return {
 		encode = function(w: Writer, v: string)
@@ -1652,9 +1483,8 @@ function Loom.enum(values: {string}): Codec<string>
 	}
 end
 
--- literal: zero bytes on the wire. always returns the same constant on decode.
--- useful for zero-cost default fields added in a new schema version -- old
--- buffers decode fine because this codec consumes nothing.
+-- literal: zero bytes on wire, always returns the same constant
+-- use for default fields added in a new schema version
 function Loom.literal<T>(value: T): Codec<T>
 	return {
 		encode = function(_w: Writer, _v: T) end,
@@ -1662,14 +1492,9 @@ function Loom.literal<T>(value: T): Codec<T>
 	}
 end
 
--- // schema
--- versioning layer. wraps a codec with a 6-byte header:
---   magic (2 bytes): 0x42 0x53 sanity check
---   schema hash (2 bytes): djb2 of the schema name, catches wrong-schema decodes
---   version (2 bytes): the version this buffer was encoded with
--- migrations walk old data forward to the current version on decode.
+-- schema versioning
+-- header: magic (2) + name hash (2) + version (2) = 6 bytes
 
--- djb2 hash truncated to u16. cheap and good enough for schema identity.
 local function nameHash(s: string): number
 	local h = 5381
 	for i = 1, #s do
@@ -1684,8 +1509,8 @@ export type SchemaConfig<T> = {
 	name: string,
 	version: number,
 	codec: Codec<T>,
-	-- migrations[v] upgrades data from version v to v+1.
-	-- missing entries are treated as no-op (purely additive change).
+	-- migrations[v] upgrades data from version v to v+1
+	-- missing entries = no-op (purely additive change)
 	migrations: {[number]: MigrationFn}?,
 }
 
@@ -1693,7 +1518,6 @@ local SchemaMT = {}
 SchemaMT.__index = SchemaMT
 
 function SchemaMT:_writeHeader(w: Writer)
-	-- bypass writeU8 assert since these are module-level constants always in range
 	w:_reserve(6)
 	b_writeu8( w._buf, w._pos,     MAGIC_0)
 	b_writeu8( w._buf, w._pos + 1, MAGIC_1)
@@ -1721,9 +1545,6 @@ function SchemaMT:_readHeader(r: Reader): number
 	return r:readU16()
 end
 
--- walks migrations from encodedVersion up to the current version.
--- missing entries mean the change was purely additive; new fields will be nil
--- until the caller sets them.
 function SchemaMT:_migrate(data: {[string]: any}, from: number): {[string]: any}
 	if from == self._version then return data end
 	if from > self._version then
@@ -1739,7 +1560,6 @@ function SchemaMT:_migrate(data: {[string]: any}, from: number): {[string]: any}
 	return data
 end
 
--- encode with full 6-byte header. use for persistence (datastore, messagingservice).
 function SchemaMT:encode(...: any): buffer
 	local w = newWriter()
 	self:_writeHeader(w)
@@ -1756,10 +1576,7 @@ function SchemaMT:encodeBase64(...: any): string
 	return base64Encode(self:encodeString(...))
 end
 
--- encodePayload: header-less encode. skips the 6-byte magic/hash/version prefix.
--- use inside a known channel where both ends have already agreed on the schema.
--- saves 6 bytes per packet -- small but adds up at 60hz with hundreds of entities.
--- warning: no schema identity check on decode. use schema:encode for persistence.
+-- encodePayload: skips the 6-byte header, use inside a known channel
 function SchemaMT:encodePayload(...: any): buffer
 	local w = newWriter()
 	local codecAny = self._codec :: any
@@ -1771,14 +1588,10 @@ function SchemaMT:encodePayloadString(...: any): string
 	return bufToStr(self:encodePayload(...))
 end
 
--- decode with full header validation + migration.
 function SchemaMT:decode(buf: buffer): any
 	local r              = newReader(buf)
 	local encodedVersion = self:_readHeader(r)
 	local data           = self._codec.decode(r)
-	-- assert no leftover bytes. a non-zero remainder means the codec consumed fewer bytes
-	-- than the buffer contains: truncated schema, version mismatch, or a codec that
-	-- silently stopped reading early.
 	local remaining = r:remaining()
 	if remaining ~= 0 then
 		error(string.format(
@@ -1797,10 +1610,7 @@ function SchemaMT:decodeBase64(s: string): any
 	return self:decodeString(base64Decode(s))
 end
 
--- decodePayload: header-less decode. counterpart to encodePayload.
--- no magic check, no hash check, no migration. you own the framing.
--- note: no leftover-byte check either since raw payloads may be sub-frames.
--- use schema:decode for anything stored to disk or sent over an untrusted channel.
+-- decodePayload: no header check, no migration
 function SchemaMT:decodePayload(buf: buffer): any
 	local r = newReader(buf)
 	return self._codec.decode(r)
@@ -1810,9 +1620,6 @@ function SchemaMT:decodePayloadString(s: string): any
 	return self:decodePayload(strToBuf(s))
 end
 
--- // public api
-
--- main entry point for versioned serialization.
 -- example:
 --   local ItemSchema = Loom.schema({
 --     name    = "Item",
@@ -1830,8 +1637,6 @@ end
 --       end,
 --     },
 --   })
---   local buf  = ItemSchema:encode({id=7, name="Katana", damage=45.5, flags={isFoil=true, isLocked=false}})
---   local item = ItemSchema:decode(buf)
 function Loom.schema<T>(config: SchemaConfig<T>): any
 	assert(type(config.name) == "string" and #config.name > 0,
 		"schema name must be a non-empty string")
@@ -1849,10 +1654,6 @@ function Loom.schema<T>(config: SchemaConfig<T>): any
 	}, SchemaMT)
 end
 
--- raw encode/decode with no schema header. use for sub-messages or when you're
--- managing framing yourself (e.g. inside another codec or a custom protocol).
--- note: no leftover-byte check since raw buffers may be sub-sections of a larger frame.
--- use schema:decode if you want the full safety check.
 function Loom.encodeRaw<T>(codec: Codec<T>, value: T, ...: any): buffer
 	local w = newWriter()
 	local codecAny = codec :: any
@@ -1865,8 +1666,6 @@ function Loom.decodeRaw<T>(codec: Codec<T>, buf: buffer): T
 	return codec.decode(r)
 end
 
--- exposed for custom codecs and tooling. build a custom codec by returning
--- {encode = fn, decode = fn} and calling the reader/writer primitives directly.
 Loom.newWriter    = newWriter
 Loom.newReader    = newReader
 Loom.base64Encode = base64Encode
